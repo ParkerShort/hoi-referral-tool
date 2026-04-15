@@ -1,0 +1,10 @@
+{
+  "uid": "hoi_referral_generate",
+  "type": "app-function",
+  "config": {
+    "entrypoint": "/app/functions/generateReferrals.js",
+    "secretKeys": [
+      "HUBDB_TABLE_ID"
+    ]
+  }
+}

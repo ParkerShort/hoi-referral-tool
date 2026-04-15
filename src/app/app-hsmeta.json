@@ -1,0 +1,34 @@
+{
+  "uid": "hoi_sandbox_app",
+  "type": "app",
+  "config": {
+    "name": "HOI Sandbox App",
+    "description": "HOI Physician Referral Lookup custom card and private serverless function.",
+    "distribution": "private",
+    "auth": {
+      "type": "static",
+      "requiredScopes": [
+        "crm.objects.contacts.read",
+        "crm.objects.contacts.write",
+        "crm.objects.custom.read",
+        "crm.objects.custom.write",
+        "hubdb"
+      ],
+      "optionalScopes": [],
+      "conditionallyRequiredScopes": []
+    },
+    "permittedUrls": {
+      "fetch": [
+        "https://api.hubapi.com"
+      ],
+      "iframe": [],
+      "img": []
+    },
+    "support": {
+      "supportEmail": "support@example.com",
+      "documentationUrl": "https://example.com/docs",
+      "supportUrl": "https://example.com/support",
+      "supportPhone": "+18005555555"
+    }
+  }
+}

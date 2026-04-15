@@ -1,0 +1,13 @@
+{
+  "uid": "hoi_sandbox_card",
+  "type": "card",
+  "config": {
+    "name": "Physician Referral Lookup",
+    "description": "Lookup physicians from HubDB and create referral records.",
+    "location": "crm.record.tab",
+    "entrypoint": "/app/cards/ReferralLookupCard.jsx",
+    "objectTypes": [
+      "contacts"
+    ]
+  }
+}
