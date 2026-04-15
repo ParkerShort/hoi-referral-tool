@@ -1,0 +1,44 @@
+name: HubSpot Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - sandbox
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hubspot-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-production:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      DEFAULT_ACCOUNT_ID: ${{ secrets.HUBSPOT_ACCOUNT_ID_PROD }}
+      DEFAULT_PERSONAL_ACCESS_KEY: ${{ secrets.HUBSPOT_PERSONAL_ACCESS_KEY_PROD }}
+      DEFAULT_CLI_VERSION: "8.4.0"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: HubSpot Project Action
+        uses: HubSpot/hubspot-project-actions@v1.0.0
+
+  deploy-sandbox:
+    if: github.ref == 'refs/heads/sandbox'
+    runs-on: ubuntu-latest
+    env:
+      DEFAULT_ACCOUNT_ID: ${{ secrets.HUBSPOT_ACCOUNT_ID_SANDBOX }}
+      DEFAULT_PERSONAL_ACCESS_KEY: ${{ secrets.HUBSPOT_PERSONAL_ACCESS_KEY_SANDBOX }}
+      DEFAULT_CLI_VERSION: "8.4.0"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: HubSpot Project Action
+        uses: HubSpot/hubspot-project-actions@v1.0.0
