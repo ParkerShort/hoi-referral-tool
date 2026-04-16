@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   hubspot,
   Alert,
@@ -22,8 +22,16 @@ hubspot.extend(({ context, actions }) => (
   <ReferralLookupCard context={context} actions={actions} />
 ));
 
+const CRM_PROPERTIES = [
+  "firstname",
+  "lastname",
+  "specialty_required",
+  "what_insurance_plan_and_company_are_you_using",
+  "zip"
+];
+
 const REQUIRED_FIELDS = [
-  { key: "specialty_needed_temporary", label: "Specialty needed" },
+  { key: "specialty_required", label: "Specialty needed" },
   {
     key: "what_insurance_plan_and_company_are_you_using",
     label: "Insurance"
@@ -33,6 +41,7 @@ const REQUIRED_FIELDS = [
 
 function ReferralLookupCard({ context, actions }) {
   const [loading, setLoading] = useState(false);
+  const [properties, setProperties] = useState({});
   const [results, setResults] = useState([]);
   const [createdCount, setCreatedCount] = useState(0);
   const [error, setError] = useState("");
@@ -44,9 +53,7 @@ function ReferralLookupCard({ context, actions }) {
     context?.recordId ||
     "";
 
-  const properties = context?.crm?.properties || {};
-
-  const specialtyNeeded = properties?.specialty_needed_temporary || "";
+  const specialtyNeeded = properties?.specialty_required || "";
   const insurance =
     properties?.what_insurance_plan_and_company_are_you_using || "";
   const zip = properties?.zip || "";
@@ -54,6 +61,27 @@ function ReferralLookupCard({ context, actions }) {
   const lastname = properties?.lastname || "";
 
   const patientName = [firstname, lastname].filter(Boolean).join(" ").trim();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    actions
+      ?.fetchCrmObjectProperties?.(CRM_PROPERTIES)
+      .then((fetchedProperties) => {
+        if (!cancelled && fetchedProperties) {
+          setProperties(fetchedProperties);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setProperties({});
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [actions, contactId]);
 
   const missingFields = useMemo(() => {
     return REQUIRED_FIELDS.filter(({ key }) => {
@@ -78,7 +106,7 @@ function ReferralLookupCard({ context, actions }) {
         propertiesToSend: [
           "firstname",
           "lastname",
-          "specialty_needed_temporary",
+          "specialty_required",
           "what_insurance_plan_and_company_are_you_using",
           "zip"
         ]

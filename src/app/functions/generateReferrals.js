@@ -62,7 +62,7 @@ exports.main = async (context = {}) => {
     const lastname = sentProps.lastname || "";
     const contactName = [firstname, lastname].filter(Boolean).join(" ").trim();
 
-    const specialtyNeeded = clean(sentProps.specialty_needed_temporary);
+    const specialtyNeeded = clean(sentProps.specialty_required);
     const insurance = clean(
       sentProps.what_insurance_plan_and_company_are_you_using
     );
@@ -73,7 +73,7 @@ exports.main = async (context = {}) => {
       : "";
 
     const missing = [];
-    if (!specialtyNeeded) missing.push("specialty_needed_temporary");
+    if (!specialtyNeeded) missing.push("specialty_required");
     if (!insurance) missing.push("what_insurance_plan_and_company_are_you_using");
     if (!zip) missing.push("zip");
 
