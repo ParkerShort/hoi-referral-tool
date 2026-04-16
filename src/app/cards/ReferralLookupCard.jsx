@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
   hubspot,
   Alert,
@@ -17,6 +17,7 @@ import {
   TableRow,
   Text
 } from "@hubspot/ui-extensions";
+import { useCrmProperties } from "@hubspot/ui-extensions/crm";
 
 hubspot.extend(({ context, actions }) => (
   <ReferralLookupCard context={context} actions={actions} />
@@ -41,7 +42,6 @@ const REQUIRED_FIELDS = [
 
 function ReferralLookupCard({ context, actions }) {
   const [loading, setLoading] = useState(false);
-  const [properties, setProperties] = useState({});
   const [results, setResults] = useState([]);
   const [createdCount, setCreatedCount] = useState(0);
   const [error, setError] = useState("");
@@ -53,6 +53,12 @@ function ReferralLookupCard({ context, actions }) {
     context?.recordId ||
     "";
 
+  const {
+    properties = {},
+    isLoading: propertiesLoading,
+    error: propertiesError
+  } = useCrmProperties(CRM_PROPERTIES);
+
   const specialtyNeeded = properties?.specialty_required || "";
   const insurance =
     properties?.what_insurance_plan_and_company_are_you_using || "";
@@ -61,28 +67,6 @@ function ReferralLookupCard({ context, actions }) {
   const lastname = properties?.lastname || "";
 
   const patientName = [firstname, lastname].filter(Boolean).join(" ").trim();
-
-  useEffect(() => {
-    let cancelled = false;
-
-    actions
-      ?.fetchCrmObjectProperties?.(CRM_PROPERTIES)
-      .then((fetchedProperties) => {
-        if (!cancelled && fetchedProperties) {
-          setProperties(fetchedProperties);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setProperties({});
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [actions, contactId]);
-
   const missingFields = useMemo(() => {
     return REQUIRED_FIELDS.filter(({ key }) => {
       const value = properties?.[key];
@@ -90,7 +74,8 @@ function ReferralLookupCard({ context, actions }) {
     });
   }, [properties]);
 
-  const isDisabled = loading || !contactId || missingFields.length > 0;
+  const isDisabled =
+    loading || propertiesLoading || !contactId || missingFields.length > 0;
 
   const handleGetReferrals = async () => {
     setLoading(true);
@@ -164,6 +149,12 @@ function ReferralLookupCard({ context, actions }) {
           </Alert>
         )}
 
+        {propertiesError && (
+          <Alert title="Unable to load record properties" variant="warning">
+            The card could not load the current record values.
+          </Alert>
+        )}
+
         {missingFields.length > 0 && (
           <Alert title="Missing required fields" variant="warning">
             Please fill in: {missingFields.map((f) => f.label).join(", ")}
@@ -178,10 +169,14 @@ function ReferralLookupCard({ context, actions }) {
 
         {!error && results.length === 0 && missingFields.length === 0 && (
           <Text>
-            Click <b>Get Referrals</b> to read the contact criteria, query HubDB,
-            randomize matching physicians, create referral records, and display
-            up to 3 results.
+            Click Get Referrals to read the contact criteria, query HubDB,
+            randomize matching physicians, create referral records, and display up
+            to 3 results.
           </Text>
+        )}
+
+        {propertiesLoading && (
+          <Text>Loading current patient data...</Text>
         )}
 
         <Flex gap="small">
