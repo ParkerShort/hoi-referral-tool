@@ -89,17 +89,15 @@ exports.main = async (context = {}) => {
     }
 
     const hubdbRows = await getHubDbRows(accessToken, config.hubdbTableId);
-    const sampleRowKeys = Object.keys(
-      hubdbRows.find((row) => row?.values && typeof row.values === "object")?.values || {}
-    );
-    const schemaIssues = validateHubDbSchema(sampleRowKeys, config.columns);
+    const discoveredRowKeys = discoverHubDbKeys(hubdbRows);
+    const schemaIssues = validateHubDbSchema(discoveredRowKeys, config.columns);
 
     if (schemaIssues.length) {
       console.log(
         JSON.stringify({
           event: "referral_lookup_schema_mismatch",
           columns: config.columns,
-          sampleRowKeys,
+          discoveredRowKeys,
           schemaIssues
         })
       );
@@ -198,7 +196,7 @@ exports.main = async (context = {}) => {
           zipMatchedExamples,
           zipMatchedInsuranceSamples,
           zipMatchedSpecialtySamples,
-          sampleRowKeys
+          discoveredRowKeys
         })
       );
 
@@ -566,11 +564,27 @@ function getPhysicianName(row, configuredColumn) {
   return [firstName, lastName].filter(Boolean).join(" ").trim();
 }
 
-function validateHubDbSchema(sampleRowKeys, columns) {
-  const keySet = new Set(sampleRowKeys || []);
+function discoverHubDbKeys(rows) {
+  const keySet = new Set();
+
+  for (const row of rows || []) {
+    if (row && typeof row === "object") {
+      Object.keys(row).forEach((key) => keySet.add(key));
+    }
+
+    if (row?.values && typeof row.values === "object") {
+      Object.keys(row.values).forEach((key) => keySet.add(key));
+    }
+  }
+
+  return [...keySet];
+}
+
+function validateHubDbSchema(discoveredRowKeys, columns) {
+  const keySet = new Set(discoveredRowKeys || []);
   const issues = [];
 
-  if (!sampleRowKeys?.length) {
+  if (!discoveredRowKeys?.length) {
     return ["No HubDB row keys were returned from the live table."];
   }
 
