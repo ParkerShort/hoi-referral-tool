@@ -14,7 +14,7 @@ exports.main = async (context = {}) => {
 
     const config = {
       hubdbTableId: process.env.HUBDB_TABLE_ID || "",
-      referralObjectType: process.env.REFERRAL_OBJECT_TYPE || "p_referral",
+      referralObjectType: process.env.REFERRAL_OBJECT_TYPE || "",
       contactToReferralAssociationTypeId:
         process.env.CONTACT_TO_REFERRAL_ASSOCIATION_TYPE_ID || "",
       contactToReferralAssociationCategory:
@@ -59,6 +59,11 @@ exports.main = async (context = {}) => {
 
     if (!config.hubdbTableId) {
       return error("Missing HUBDB_TABLE_ID secret.");
+    }
+    if (!config.referralObjectType) {
+      return error(
+        "Missing REFERRAL_OBJECT_TYPE secret. Set this to the live HubSpot custom object type ID for referrals."
+      );
     }
 
     const sentProps = context?.propertiesToSend || {};
@@ -395,6 +400,14 @@ async function hubspotFetch(path, token, options = {}) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
+    if (
+      typeof data?.message === "string" &&
+      data.message.includes("Unable to infer object type from")
+    ) {
+      throw new Error(
+        `${data.message} Set REFERRAL_OBJECT_TYPE to the live custom object type ID (for example, 2-12345678) instead of a placeholder name.`
+      );
+    }
     const message =
       data?.message ||
       data?.error ||

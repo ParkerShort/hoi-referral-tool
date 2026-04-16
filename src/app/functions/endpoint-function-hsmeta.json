@@ -4,7 +4,8 @@
   "config": {
     "entrypoint": "/app/functions/generateReferrals.js",
     "secretKeys": [
-      "HUBDB_TABLE_ID"
+      "HUBDB_TABLE_ID",
+      "REFERRAL_OBJECT_TYPE"
     ]
   }
 }
