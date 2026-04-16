@@ -286,15 +286,22 @@ exports.main = async (context = {}) => {
         readColumn(row, "area_of_expertise_aoe"),
         readColumn(row, "specialty")
       ]);
-      const specialtyCode = clean(readColumn(row, "specialtycode"));
+      const specialtyCode = clean(
+        firstNonEmptyValue([
+          readColumn(row, "specialty_code"),
+          readColumn(row, "specialtycode")
+        ])
+      );
       const insurancesAccepted = clean(
         firstNonEmptyValue([
           readColumn(row, config.columns.insurance),
           readColumn(row, "insurances_accepted")
         ])
       );
-      const acceptingNewPatients = clean(readColumn(row, "accepting_new_patients"));
-      const physicianAcceptsReferrals = clean(
+      const acceptingNewPatients = normalizeReferralYesNo(
+        readColumn(row, "accepting_new_patients")
+      );
+      const physicianAcceptsReferrals = normalizeReferralTrueFalse(
         readColumn(row, "physician_accepts_referrals")
       );
       const boardCertifications = clean(readColumn(row, "board_certifications"));
@@ -302,7 +309,7 @@ exports.main = async (context = {}) => {
       const stateLicenseNo = clean(readColumn(row, "state_license_no"));
       const stateLicenseState = clean(readColumn(row, "state_license_state"));
       const dea = clean(readColumn(row, "dea"));
-      const status = clean(readColumn(row, "status"));
+      const status = normalizeReferralStatus(readColumn(row, "status"));
       const offices = getOffices(row);
       const matchedOffice = findBestMatchingOffice(offices, zip);
       const primaryOffice = matchedOffice || offices.find(hasOfficeData) || null;
@@ -320,6 +327,7 @@ exports.main = async (context = {}) => {
       ]);
       const hubdbRowId = String(row.id || row.hs_id || "");
       const normalizedReferralSpecialty = normalizeReferralSpecialty(aoe);
+      const normalizedAreaOfExpertise = normalizeReferralAreaOfExpertise(aoe);
 
       const referralPayload = {
         properties: {}
@@ -373,7 +381,7 @@ exports.main = async (context = {}) => {
       addPropertyIfPresent(
         referralPayload.properties,
         config.referralProperties.areaOfExpertise,
-        aoe
+        normalizedAreaOfExpertise
       );
       addPropertyIfPresent(
         referralPayload.properties,
@@ -845,7 +853,7 @@ function findBestMatchingOffice(offices, targetZip) {
 }
 
 function normalizeReferralSpecialty(value) {
-  const normalized = clean(value);
+  const normalized = firstValue(value);
   if (!normalized) return "";
 
   const specialtyMap = {
@@ -869,6 +877,65 @@ function normalizeReferralSpecialty(value) {
   };
 
   return specialtyMap[normalized] || "";
+}
+
+function normalizeReferralAreaOfExpertise(value) {
+  const normalized = firstValue(value);
+  if (!normalized) return "";
+
+  const aoeMap = {
+    joint_replacement_surgery: "Joint Replacement Surgery",
+    "non-operative_sports_medicine": "non-operative_sports_medicine",
+    non_operative_sports_medicine: "non-operative_sports_medicine",
+    spine_surgery: "spine_surgery",
+    pain_medicine: "pain_medicine",
+    hand_and_wrist_surgery: "hand_and_wrist_surgery",
+    shoulder_surgery: "shoulder_surgery",
+    sports_medicine_surgery: "sports_medicine_surgery",
+    sports_medicine: "sports_medicine",
+    foot_and_ankle_surgery: "foot_and_ankle_surgery",
+    elbow_surgery: "elbow_surgery"
+  };
+
+  return aoeMap[normalized] || "";
+}
+
+function normalizeReferralYesNo(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) return "";
+  if (normalized === "y" || normalized === "yes" || normalized === "true") {
+    return "Y";
+  }
+  if (normalized === "n" || normalized === "no" || normalized === "false") {
+    return "N";
+  }
+  return "";
+}
+
+function normalizeReferralTrueFalse(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) return "";
+  if (normalized === "true" || normalized === "y" || normalized === "yes") {
+    return "True";
+  }
+  if (normalized === "false" || normalized === "n" || normalized === "no") {
+    return "False";
+  }
+  return "";
+}
+
+function normalizeReferralStatus(value) {
+  const normalized = normalizeText(value);
+  const statusMap = {
+    provisional: "Provisional",
+    community: "Community",
+    active: "Active"
+  };
+  return statusMap[normalized] || "";
+}
+
+function firstValue(value) {
+  return toValueList(value)[0] || "";
 }
 
 function discoverHubDbKeys(rows) {
