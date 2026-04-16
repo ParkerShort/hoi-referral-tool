@@ -89,6 +89,26 @@ exports.main = async (context = {}) => {
     }
 
     const hubdbRows = await getHubDbRows(accessToken, config.hubdbTableId);
+    const sampleRowKeys = Object.keys(
+      hubdbRows.find((row) => row?.values && typeof row.values === "object")?.values || {}
+    );
+    const schemaIssues = validateHubDbSchema(sampleRowKeys, config.columns);
+
+    if (schemaIssues.length) {
+      console.log(
+        JSON.stringify({
+          event: "referral_lookup_schema_mismatch",
+          columns: config.columns,
+          sampleRowKeys,
+          schemaIssues
+        })
+      );
+
+      return error(
+        "Live HubDB table schema does not match this function's expected columns. " +
+          schemaIssues.join(" ")
+      );
+    }
 
     const evaluatedRows = hubdbRows.map((row) => {
       const aoeValue = firstNonEmptyValue([
@@ -157,10 +177,12 @@ exports.main = async (context = {}) => {
           insurance: previewValue(item.insuranceValue),
           zip: previewValue(item.zipValues)
         }));
-      const sampleRowKeys = Object.keys(
-        hubdbRows.find((row) => row?.values && typeof row.values === "object")?.values || {}
-      );
-
+      const zipMatchedInsuranceSamples = uniqueValues(
+        zipMatchedExamples.map((item) => item.insurance)
+      ).slice(0, 3);
+      const zipMatchedSpecialtySamples = uniqueValues(
+        zipMatchedExamples.map((item) => item.specialty)
+      ).slice(0, 3);
       console.log(
         JSON.stringify({
           event: "referral_lookup_no_match",
@@ -174,9 +196,18 @@ exports.main = async (context = {}) => {
           },
           nearMatches,
           zipMatchedExamples,
+          zipMatchedInsuranceSamples,
+          zipMatchedSpecialtySamples,
           sampleRowKeys
         })
       );
+
+      const zipMatchedInsuranceNote = zipMatchedInsuranceSamples.length
+        ? ` ZIP-matched insurance samples: ${zipMatchedInsuranceSamples.join(" | ")}.`
+        : "";
+      const zipMatchedSpecialtyNote = zipMatchedSpecialtySamples.length
+        ? ` ZIP-matched specialty samples: ${zipMatchedSpecialtySamples.join(" | ")}.`
+        : "";
 
       return {
         status: "success",
@@ -185,14 +216,18 @@ exports.main = async (context = {}) => {
         results: [],
         message:
           "No physicians match this patient’s criteria. " +
-          `Matched specialty in ${specialtyMatches} row(s), insurance in ${insuranceMatches}, and ZIP in ${zipMatches}.`,
+          `Matched specialty in ${specialtyMatches} row(s), insurance in ${insuranceMatches}, and ZIP in ${zipMatches}.` +
+          zipMatchedSpecialtyNote +
+          zipMatchedInsuranceNote,
         diagnostics: {
           totalRows: evaluatedRows.length,
           specialtyMatches,
           insuranceMatches,
           zipMatches,
           nearMatches,
-          zipMatchedExamples
+          zipMatchedExamples,
+          zipMatchedInsuranceSamples,
+          zipMatchedSpecialtySamples
         }
       };
     }
@@ -529,4 +564,34 @@ function getPhysicianName(row, configuredColumn) {
   const firstName = clean(readColumn(row, "first_name"));
   const lastName = clean(readColumn(row, "last_name"));
   return [firstName, lastName].filter(Boolean).join(" ").trim();
+}
+
+function validateHubDbSchema(sampleRowKeys, columns) {
+  const keySet = new Set(sampleRowKeys || []);
+  const issues = [];
+
+  if (!sampleRowKeys?.length) {
+    return ["No HubDB row keys were returned from the live table."];
+  }
+
+  if (!keySet.has(columns.aoe) && !keySet.has("specialty")) {
+    issues.push(
+      `Expected specialty column '${columns.aoe}' was not found in live table keys.`
+    );
+  }
+
+  if (!keySet.has(columns.insurance)) {
+    issues.push(
+      `Expected insurance column '${columns.insurance}' was not found in live table keys.`
+    );
+  }
+
+  const hasAnyZipColumn = (columns.zips || []).some((key) => keySet.has(key));
+  if (!hasAnyZipColumn) {
+    issues.push(
+      `None of the expected ZIP columns were found: ${(columns.zips || []).join(", ")}.`
+    );
+  }
+
+  return issues;
 }
