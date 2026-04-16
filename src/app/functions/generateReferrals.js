@@ -41,6 +41,8 @@ exports.main = async (context = {}) => {
           process.env.REFERRAL_PROP_PHYSICIAN_NAME || "physician_name",
         physicianNpi: process.env.REFERRAL_PROP_PHYSICIAN_NPI || "physician_npi",
         specialty: process.env.REFERRAL_PROP_SPECIALTY || "specialty",
+        areaOfExpertise:
+          process.env.REFERRAL_PROP_AREA_OF_EXPERTISE || "area_of_expertise_aoe",
         location: process.env.REFERRAL_PROP_LOCATION || "location",
         phone: process.env.REFERRAL_PROP_PHONE || "phone",
         referredBy: process.env.REFERRAL_PROP_REFERRED_BY || "referred_by",
@@ -53,7 +55,38 @@ exports.main = async (context = {}) => {
         patientMedicalId:
           process.env.REFERRAL_PROP_PATIENT_MEDICAL_ID || "patient_medical_id",
         hubdbRowId: process.env.REFERRAL_PROP_HUBDB_ROW_ID || "hubdb_row_id",
-        referralDate: process.env.REFERRAL_PROP_REFERRAL_DATE || "referral_date"
+        referralDate: process.env.REFERRAL_PROP_REFERRAL_DATE || "referral_date",
+        firstName: process.env.REFERRAL_PROP_FIRST_NAME || "first_name",
+        lastName: process.env.REFERRAL_PROP_LAST_NAME || "last_name",
+        middleName: process.env.REFERRAL_PROP_MIDDLE_NAME || "middle_name",
+        salutation: process.env.REFERRAL_PROP_SALUTATION || "salutation",
+        gender: process.env.REFERRAL_PROP_GENDER || "gender",
+        title: process.env.REFERRAL_PROP_TITLE || "title",
+        medicalGroup: process.env.REFERRAL_PROP_MEDICAL_GROUP || "medical_group",
+        specialtyCode:
+          process.env.REFERRAL_PROP_SPECIALTY_CODE || "specialty_code",
+        acceptingNewPatients:
+          process.env.REFERRAL_PROP_ACCEPTING_NEW_PATIENTS ||
+          "accepting_new_patients",
+        physicianAcceptsReferrals:
+          process.env.REFERRAL_PROP_PHYSICIAN_ACCEPTS_REFERRALS ||
+          "physician_accepts_referrals",
+        boardCertifications:
+          process.env.REFERRAL_PROP_BOARD_CERTIFICATIONS ||
+          "board_certifications",
+        keywordsBySpecialty:
+          process.env.REFERRAL_PROP_KEYWORDS_BY_SPECIALTY ||
+          "keywords_by_specialty",
+        stateLicenseNo:
+          process.env.REFERRAL_PROP_STATE_LICENSE_NO || "state_license_no",
+        stateLicenseState:
+          process.env.REFERRAL_PROP_STATE_LICENSE_STATE ||
+          "state_license_state",
+        dea: process.env.REFERRAL_PROP_DEA || "dea",
+        insurancesAccepted:
+          process.env.REFERRAL_PROP_INSURANCES_ACCEPTED ||
+          "insurances_accepted",
+        status: process.env.REFERRAL_PROP_STATUS || "status"
       }
     };
 
@@ -240,50 +273,238 @@ exports.main = async (context = {}) => {
     const created = [];
     for (const row of randomized) {
       const physicianName = getPhysicianName(row, config.columns.physicianName);
+      const firstName = clean(readColumn(row, "first_name"));
+      const lastName = clean(readColumn(row, "last_name"));
+      const middleName = clean(readColumn(row, "middle_name"));
+      const salutation = clean(readColumn(row, "salutation"));
+      const gender = clean(readColumn(row, "gender"));
+      const title = clean(readColumn(row, "title"));
+      const medicalGroup = clean(readColumn(row, "medical_group"));
       const npi = clean(readColumn(row, config.columns.npi));
       const aoe = firstNonEmptyValue([
         readColumn(row, config.columns.aoe),
         readColumn(row, "area_of_expertise_aoe"),
         readColumn(row, "specialty")
       ]);
-      const providerZip = firstNonEmptyValue([
-        ...config.columns.zips.map((key) => readColumn(row, key)),
-        readColumn(row, "office_1_address_zip"),
-        readColumn(row, "office_2_address_zip"),
-        readColumn(row, "office_3_address_zip"),
-        readColumn(row, "office_4_address_zip"),
-        readColumn(row, "office_5_address_zip")
-      ]);
+      const specialtyCode = clean(readColumn(row, "specialtycode"));
+      const insurancesAccepted = clean(
+        firstNonEmptyValue([
+          readColumn(row, config.columns.insurance),
+          readColumn(row, "insurances_accepted")
+        ])
+      );
+      const acceptingNewPatients = clean(readColumn(row, "accepting_new_patients"));
+      const physicianAcceptsReferrals = clean(
+        readColumn(row, "physician_accepts_referrals")
+      );
+      const boardCertifications = clean(readColumn(row, "board_certifications"));
+      const keywordsBySpecialty = clean(readColumn(row, "keywords_by_specialty"));
+      const stateLicenseNo = clean(readColumn(row, "state_license_no"));
+      const stateLicenseState = clean(readColumn(row, "state_license_state"));
+      const dea = clean(readColumn(row, "dea"));
+      const status = clean(readColumn(row, "status"));
+      const offices = getOffices(row);
+      const matchedOffice = findBestMatchingOffice(offices, zip);
+      const primaryOffice = matchedOffice || offices.find(hasOfficeData) || null;
+      const providerZip = primaryOffice?.zip || "";
       const phone = firstNonEmptyValue([
+        primaryOffice?.telephone,
         readColumn(row, config.columns.phone),
         readColumn(row, "office_1_address_telephone")
       ]);
       const fax = clean(readColumn(row, config.columns.fax));
       const address = firstNonEmptyValue([
+        primaryOffice?.address,
         readColumn(row, config.columns.address),
         readColumn(row, "office_1_address")
       ]);
       const hubdbRowId = String(row.id || row.hs_id || "");
+      const normalizedReferralSpecialty = normalizeReferralSpecialty(aoe);
 
       const referralPayload = {
-        properties: {
-          [config.referralProperties.physicianName]: physicianName,
-          [config.referralProperties.physicianNpi]: npi,
-          [config.referralProperties.specialty]: aoe,
-          [config.referralProperties.location]: address || providerZip,
-          [config.referralProperties.phone]: phone,
-          [config.referralProperties.referredBy]: "Physician Referral Lookup Card",
-          [config.referralProperties.searchInsurance]: insurance,
-          [config.referralProperties.searchLocation]: zip,
-          [config.referralProperties.searchSpecialty]: specialtyNeeded,
-          [config.referralProperties.hubdbRowId]: hubdbRowId,
-          [config.referralProperties.referralDate]:
-            new Date().toISOString().split("T")[0]
-        }
+        properties: {}
       };
 
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.physicianName,
+        physicianName
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.firstName,
+        firstName
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.lastName,
+        lastName
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.middleName,
+        middleName
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.salutation,
+        salutation
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.gender,
+        gender
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.title,
+        title
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.medicalGroup,
+        medicalGroup
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.physicianNpi,
+        npi
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.areaOfExpertise,
+        aoe
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.specialty,
+        normalizedReferralSpecialty
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.specialtyCode,
+        specialtyCode
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.location,
+        address || providerZip
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.phone,
+        phone
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.insurancesAccepted,
+        insurancesAccepted
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.acceptingNewPatients,
+        acceptingNewPatients
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.physicianAcceptsReferrals,
+        physicianAcceptsReferrals
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.boardCertifications,
+        boardCertifications
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.keywordsBySpecialty,
+        keywordsBySpecialty
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.stateLicenseNo,
+        stateLicenseNo
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.stateLicenseState,
+        stateLicenseState
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.dea,
+        dea
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.status,
+        status
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.referredBy,
+        "Physician Referral Lookup Card"
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.searchInsurance,
+        insurance
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.searchLocation,
+        zip
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.searchSpecialty,
+        specialtyNeeded
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.hubdbRowId,
+        hubdbRowId
+      );
+      addPropertyIfPresent(
+        referralPayload.properties,
+        config.referralProperties.referralDate,
+        new Date().toISOString().split("T")[0]
+      );
+
+      for (const office of offices) {
+        addPropertyIfPresent(
+          referralPayload.properties,
+          `office_${office.index}_address`,
+          office.address
+        );
+        addPropertyIfPresent(
+          referralPayload.properties,
+          `office_${office.index}_address_city`,
+          office.city
+        );
+        addPropertyIfPresent(
+          referralPayload.properties,
+          `office_${office.index}_address_state`,
+          office.state
+        );
+        addPropertyIfPresent(
+          referralPayload.properties,
+          `office_${office.index}_address_zip`,
+          office.zip
+        );
+        addPropertyIfPresent(
+          referralPayload.properties,
+          `office_${office.index}_address_telephone`,
+          office.telephone
+        );
+      }
+
       if (pmi) {
-        referralPayload.properties[config.referralProperties.patientMedicalId] = pmi;
+        addPropertyIfPresent(
+          referralPayload.properties,
+          config.referralProperties.patientMedicalId,
+          pmi
+        );
       }
 
       const referralRecord = await createCustomObjectRecord(
@@ -575,6 +796,79 @@ function getPhysicianName(row, configuredColumn) {
   const firstName = clean(readColumn(row, "first_name"));
   const lastName = clean(readColumn(row, "last_name"));
   return [firstName, lastName].filter(Boolean).join(" ").trim();
+}
+
+function addPropertyIfPresent(target, key, value) {
+  const cleanedKey = clean(key);
+  if (!cleanedKey) return;
+
+  if (value == null) return;
+  const normalizedValue =
+    typeof value === "string" ? value.trim() : stringifyValue(value).trim();
+
+  if (!normalizedValue) return;
+  target[cleanedKey] = normalizedValue;
+}
+
+function getOffices(row) {
+  const offices = [];
+
+  for (let index = 1; index <= 5; index += 1) {
+    offices.push({
+      index,
+      address: clean(readColumn(row, `office_${index}_address`)),
+      city: clean(readColumn(row, `office_${index}_address_city`)),
+      state: clean(readColumn(row, `office_${index}_address_state`)),
+      zip: clean(readColumn(row, `office_${index}_address_zip`)),
+      telephone: clean(readColumn(row, `office_${index}_address_telephone`))
+    });
+  }
+
+  return offices;
+}
+
+function hasOfficeData(office) {
+  return Boolean(
+    office &&
+      (office.address || office.city || office.state || office.zip || office.telephone)
+  );
+}
+
+function findBestMatchingOffice(offices, targetZip) {
+  const normalizedTargetZip = normalizeZip(targetZip);
+  if (!normalizedTargetZip) return null;
+
+  return (
+    offices.find((office) => normalizeZip(office?.zip) === normalizedTargetZip) ||
+    null
+  );
+}
+
+function normalizeReferralSpecialty(value) {
+  const normalized = clean(value);
+  if (!normalized) return "";
+
+  const specialtyMap = {
+    orthopedic_surgery: "orthopedic_surgery",
+    sports_medicine: "sports_medicine",
+    pain_medicine: "pain_medicine",
+    neurosurgery: "neurosurgery",
+    physical_medicine_and_rehabilitation:
+      "physical_medicine_and_rehabilitation",
+    "non-operative_sports_medicine": "sports_medicine",
+    non_operative_sports_medicine: "sports_medicine",
+    shoulder_surgery: "orthopedic_surgery",
+    knee_surgery: "orthopedic_surgery",
+    hip_surgery: "orthopedic_surgery",
+    spine_surgery: "orthopedic_surgery",
+    joint_replacement_surgery: "orthopedic_surgery",
+    hand_and_wrist_surgery: "orthopedic_surgery",
+    foot_and_ankle_surgery: "orthopedic_surgery",
+    elbow_surgery: "orthopedic_surgery",
+    trauma_surgery: "orthopedic_surgery"
+  };
+
+  return specialtyMap[normalized] || "";
 }
 
 function discoverHubDbKeys(rows) {
