@@ -22,17 +22,17 @@ exports.main = async (context = {}) => {
       pmiProperty: process.env.CONTACT_PMI_PROPERTY || "",
 
       columns: {
-        aoe: process.env.HUBDB_COL_AOE || "area_of_expertise",
+        aoe: process.env.HUBDB_COL_AOE || "area_of_expertise_aoe",
         insurance: process.env.HUBDB_COL_INSURANCE || "insurances_accepted",
         zips: parseColumnList(
           process.env.HUBDB_COL_ZIPS ||
             process.env.HUBDB_COL_ZIP ||
             "office_1_address_zip,office_2_address_zip,office_3_address_zip,office_4_address_zip,office_5_address_zip"
         ),
-        physicianName: process.env.HUBDB_COL_PHYSICIAN_NAME || "physician_name",
+        physicianName: process.env.HUBDB_COL_PHYSICIAN_NAME || "",
         npi: process.env.HUBDB_COL_NPI || "npi",
-        phone: process.env.HUBDB_COL_PHONE || "phone",
-        fax: process.env.HUBDB_COL_FAX || "fax",
+        phone: process.env.HUBDB_COL_PHONE || "office_1_address_telephone",
+        fax: process.env.HUBDB_COL_FAX || "",
         address: process.env.HUBDB_COL_ADDRESS || "office_1_address"
       },
 
@@ -91,9 +91,23 @@ exports.main = async (context = {}) => {
     const hubdbRows = await getHubDbRows(accessToken, config.hubdbTableId);
 
     const evaluatedRows = hubdbRows.map((row) => {
-      const aoeValue = readColumn(row, config.columns.aoe);
-      const insuranceValue = readColumn(row, config.columns.insurance);
-      const zipValues = config.columns.zips.map((key) => readColumn(row, key));
+      const aoeValue = firstNonEmptyValue([
+        readColumn(row, config.columns.aoe),
+        readColumn(row, "area_of_expertise_aoe"),
+        readColumn(row, "specialty")
+      ]);
+      const insuranceValue = firstNonEmptyValue([
+        readColumn(row, config.columns.insurance),
+        readColumn(row, "insurances_accepted")
+      ]);
+      const zipValues = uniqueValues([
+        ...config.columns.zips.map((key) => readColumn(row, key)),
+        readColumn(row, "office_1_address_zip"),
+        readColumn(row, "office_2_address_zip"),
+        readColumn(row, "office_3_address_zip"),
+        readColumn(row, "office_4_address_zip"),
+        readColumn(row, "office_5_address_zip")
+      ]);
 
       const specialtyMatch = matchesText(aoeValue, specialtyNeeded);
       const insuranceMatch = matchesInsurance(insuranceValue, insurance);
@@ -124,7 +138,7 @@ exports.main = async (context = {}) => {
         .sort((a, b) => b.score - a.score)
         .slice(0, 3)
         .map((item) => ({
-          physicianName: clean(readColumn(item.row, config.columns.physicianName)) || "Unknown",
+          physicianName: getPhysicianName(item.row, config.columns.physicianName) || "Unknown",
           specialty: previewValue(item.aoeValue),
           insurance: previewValue(item.insuranceValue),
           zip: previewValue(item.zipValues),
@@ -134,18 +148,33 @@ exports.main = async (context = {}) => {
             item.zipMatch ? "zip" : null
           ].filter(Boolean)
         }));
+      const zipMatchedExamples = evaluatedRows
+        .filter((item) => item.zipMatch)
+        .slice(0, 5)
+        .map((item) => ({
+          physicianName: getPhysicianName(item.row, config.columns.physicianName) || "Unknown",
+          specialty: previewValue(item.aoeValue),
+          insurance: previewValue(item.insuranceValue),
+          zip: previewValue(item.zipValues)
+        }));
+      const sampleRowKeys = Object.keys(
+        hubdbRows.find((row) => row?.values && typeof row.values === "object")?.values || {}
+      );
 
       console.log(
         JSON.stringify({
           event: "referral_lookup_no_match",
           criteria: { specialtyNeeded, insurance, zip },
+          columns: config.columns,
           counts: {
             totalRows: evaluatedRows.length,
             specialtyMatches,
             insuranceMatches,
             zipMatches
           },
-          nearMatches
+          nearMatches,
+          zipMatchedExamples,
+          sampleRowKeys
         })
       );
 
@@ -162,7 +191,8 @@ exports.main = async (context = {}) => {
           specialtyMatches,
           insuranceMatches,
           zipMatches,
-          nearMatches
+          nearMatches,
+          zipMatchedExamples
         }
       };
     }
@@ -171,16 +201,31 @@ exports.main = async (context = {}) => {
 
     const created = [];
     for (const row of randomized) {
-      const physicianName = clean(readColumn(row, config.columns.physicianName));
+      const physicianName = getPhysicianName(row, config.columns.physicianName);
       const npi = clean(readColumn(row, config.columns.npi));
-      const aoe = clean(readColumn(row, config.columns.aoe));
-      const providerZip = firstNonEmptyValue(
-        config.columns.zips.map((key) => readColumn(row, key))
-      );
-      const phone = clean(readColumn(row, config.columns.phone));
+      const aoe = firstNonEmptyValue([
+        readColumn(row, config.columns.aoe),
+        readColumn(row, "area_of_expertise_aoe"),
+        readColumn(row, "specialty")
+      ]);
+      const providerZip = firstNonEmptyValue([
+        ...config.columns.zips.map((key) => readColumn(row, key)),
+        readColumn(row, "office_1_address_zip"),
+        readColumn(row, "office_2_address_zip"),
+        readColumn(row, "office_3_address_zip"),
+        readColumn(row, "office_4_address_zip"),
+        readColumn(row, "office_5_address_zip")
+      ]);
+      const phone = firstNonEmptyValue([
+        readColumn(row, config.columns.phone),
+        readColumn(row, "office_1_address_telephone")
+      ]);
       const fax = clean(readColumn(row, config.columns.fax));
-      const address = clean(readColumn(row, config.columns.address));
-      const hubdbRowId = String(row.id || "");
+      const address = firstNonEmptyValue([
+        readColumn(row, config.columns.address),
+        readColumn(row, "office_1_address")
+      ]);
+      const hubdbRowId = String(row.id || row.hs_id || "");
 
       const referralPayload = {
         properties: {
@@ -458,4 +503,30 @@ function firstNonEmptyValue(values) {
     if (cleaned) return cleaned;
   }
   return "";
+}
+
+function uniqueValues(values) {
+  const seen = new Set();
+  const result = [];
+
+  for (const value of values) {
+    const cleaned = clean(value);
+    if (!cleaned || seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    result.push(cleaned);
+  }
+
+  return result;
+}
+
+function getPhysicianName(row, configuredColumn) {
+  const configuredName = configuredColumn ? clean(readColumn(row, configuredColumn)) : "";
+  if (configuredName) return configuredName;
+
+  const hsName = clean(readColumn(row, "hs_name"));
+  if (hsName) return hsName;
+
+  const firstName = clean(readColumn(row, "first_name"));
+  const lastName = clean(readColumn(row, "last_name"));
+  return [firstName, lastName].filter(Boolean).join(" ").trim();
 }
