@@ -24,7 +24,11 @@ exports.main = async (context = {}) => {
       columns: {
         aoe: process.env.HUBDB_COL_AOE || "area_of_expertise",
         insurance: process.env.HUBDB_COL_INSURANCE || "insurances_accepted",
-        zip: process.env.HUBDB_COL_ZIP || "office_1_address_zip",
+        zips: parseColumnList(
+          process.env.HUBDB_COL_ZIPS ||
+            process.env.HUBDB_COL_ZIP ||
+            "office_1_address_zip,office_2_address_zip,office_3_address_zip,office_4_address_zip,office_5_address_zip"
+        ),
         physicianName: process.env.HUBDB_COL_PHYSICIAN_NAME || "physician_name",
         npi: process.env.HUBDB_COL_NPI || "npi",
         phone: process.env.HUBDB_COL_PHONE || "phone",
@@ -86,25 +90,80 @@ exports.main = async (context = {}) => {
 
     const hubdbRows = await getHubDbRows(accessToken, config.hubdbTableId);
 
-    const filtered = hubdbRows.filter((row) => {
-      const aoeValue = clean(readColumn(row, config.columns.aoe));
-      const insuranceValue = clean(readColumn(row, config.columns.insurance));
-      const zipValue = clean(readColumn(row, config.columns.zip));
+    const evaluatedRows = hubdbRows.map((row) => {
+      const aoeValue = readColumn(row, config.columns.aoe);
+      const insuranceValue = readColumn(row, config.columns.insurance);
+      const zipValues = config.columns.zips.map((key) => readColumn(row, key));
 
-      return (
-        matchesText(aoeValue, specialtyNeeded) &&
-        matchesInsurance(insuranceValue, insurance) &&
-        matchesZip(zipValue, zip)
-      );
+      const specialtyMatch = matchesText(aoeValue, specialtyNeeded);
+      const insuranceMatch = matchesInsurance(insuranceValue, insurance);
+      const zipMatch = matchesAnyZip(zipValues, zip);
+
+      return {
+        row,
+        aoeValue,
+        insuranceValue,
+        zipValues,
+        specialtyMatch,
+        insuranceMatch,
+        zipMatch,
+        score: [specialtyMatch, insuranceMatch, zipMatch].filter(Boolean).length
+      };
     });
 
+    const filtered = evaluatedRows
+      .filter((item) => item.specialtyMatch && item.insuranceMatch && item.zipMatch)
+      .map((item) => item.row);
+
     if (!filtered.length) {
+      const specialtyMatches = evaluatedRows.filter((item) => item.specialtyMatch).length;
+      const insuranceMatches = evaluatedRows.filter((item) => item.insuranceMatch).length;
+      const zipMatches = evaluatedRows.filter((item) => item.zipMatch).length;
+      const nearMatches = evaluatedRows
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3)
+        .map((item) => ({
+          physicianName: clean(readColumn(item.row, config.columns.physicianName)) || "Unknown",
+          specialty: previewValue(item.aoeValue),
+          insurance: previewValue(item.insuranceValue),
+          zip: previewValue(item.zipValues),
+          matchedCriteria: [
+            item.specialtyMatch ? "specialty" : null,
+            item.insuranceMatch ? "insurance" : null,
+            item.zipMatch ? "zip" : null
+          ].filter(Boolean)
+        }));
+
+      console.log(
+        JSON.stringify({
+          event: "referral_lookup_no_match",
+          criteria: { specialtyNeeded, insurance, zip },
+          counts: {
+            totalRows: evaluatedRows.length,
+            specialtyMatches,
+            insuranceMatches,
+            zipMatches
+          },
+          nearMatches
+        })
+      );
+
       return {
         status: "success",
         contactName,
         createdCount: 0,
         results: [],
-        message: "No physicians match this patient’s criteria."
+        message:
+          "No physicians match this patient’s criteria. " +
+          `Matched specialty in ${specialtyMatches} row(s), insurance in ${insuranceMatches}, and ZIP in ${zipMatches}.`,
+        diagnostics: {
+          totalRows: evaluatedRows.length,
+          specialtyMatches,
+          insuranceMatches,
+          zipMatches,
+          nearMatches
+        }
       };
     }
 
@@ -115,7 +174,9 @@ exports.main = async (context = {}) => {
       const physicianName = clean(readColumn(row, config.columns.physicianName));
       const npi = clean(readColumn(row, config.columns.npi));
       const aoe = clean(readColumn(row, config.columns.aoe));
-      const providerZip = clean(readColumn(row, config.columns.zip));
+      const providerZip = firstNonEmptyValue(
+        config.columns.zips.map((key) => readColumn(row, key))
+      );
       const phone = clean(readColumn(row, config.columns.phone));
       const fax = clean(readColumn(row, config.columns.fax));
       const address = clean(readColumn(row, config.columns.address));
@@ -179,30 +240,45 @@ exports.main = async (context = {}) => {
 };
 
 function clean(value) {
-  return String(value || "").trim();
+  return stringifyValue(value).trim();
 }
 
 function matchesText(source, target) {
   if (!source || !target) return false;
-  return source.toLowerCase() === target.toLowerCase();
+  const targetNormalized = normalizeText(target);
+  return toValueList(source).some((candidate) => {
+    const normalized = normalizeText(candidate);
+    return (
+      normalized === targetNormalized ||
+      normalized.includes(targetNormalized) ||
+      targetNormalized.includes(normalized)
+    );
+  });
 }
 
 function matchesInsurance(source, target) {
   if (!source || !target) return false;
-
-  const sourceLower = source.toLowerCase();
-  const targetLower = target.toLowerCase();
-
-  return (
-    sourceLower === targetLower ||
-    sourceLower.includes(targetLower) ||
-    targetLower.includes(sourceLower)
-  );
+  const targetNormalized = normalizeText(target);
+  return toValueList(source).some((candidate) => {
+    const normalized = normalizeText(candidate);
+    return (
+      normalized === targetNormalized ||
+      normalized.includes(targetNormalized) ||
+      targetNormalized.includes(normalized)
+    );
+  });
 }
 
 function matchesZip(source, target) {
   if (!source || !target) return false;
-  return String(source).trim() === String(target).trim();
+  const targetZip = normalizeZip(target);
+  if (!targetZip) return false;
+
+  return toValueList(source).some((candidate) => normalizeZip(candidate) === targetZip);
+}
+
+function matchesAnyZip(sources, target) {
+  return sources.some((source) => matchesZip(source, target));
 }
 
 function readColumn(row, key) {
@@ -263,13 +339,24 @@ async function getContact(token, contactId, properties = []) {
 }
 
 async function getHubDbRows(token, tableId) {
-  const result = await hubspotFetch(
-    `/cms/v3/hubdb/tables/${tableId}/rows`,
-    token,
-    { method: "GET" }
-  );
+  const rows = [];
+  let after;
 
-  return result?.results || [];
+  do {
+    const query = new URLSearchParams();
+    if (after) query.set("after", after);
+
+    const result = await hubspotFetch(
+      `/cms/v3/hubdb/tables/${tableId}/rows${query.toString() ? `?${query.toString()}` : ""}`,
+      token,
+      { method: "GET" }
+    );
+
+    rows.push(...(result?.results || []));
+    after = result?.paging?.next?.after;
+  } while (after);
+
+  return rows;
 }
 
 async function createCustomObjectRecord(token, objectType, payload) {
@@ -319,4 +406,56 @@ async function associateReferralToContact(
 async function getContactProperty(token, contactId, propertyName) {
   const contact = await getContact(token, contactId, [propertyName]);
   return clean(contact?.properties?.[propertyName]);
+}
+
+function stringifyValue(value) {
+  if (value == null) return "";
+  if (Array.isArray(value)) return value.map(stringifyValue).filter(Boolean).join("; ");
+  if (typeof value === "object") {
+    if (typeof value.label === "string") return value.label;
+    if (typeof value.name === "string") return value.name;
+    if (typeof value.value === "string") return value.value;
+    return "";
+  }
+  return String(value);
+}
+
+function toValueList(value) {
+  return stringifyValue(value)
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeText(value) {
+  return stringifyValue(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function normalizeZip(value) {
+  const digits = stringifyValue(value).replace(/\D/g, "");
+  return digits.slice(0, 5);
+}
+
+function previewValue(value) {
+  const list = toValueList(value);
+  return list.slice(0, 3).join("; ");
+}
+
+function parseColumnList(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function firstNonEmptyValue(values) {
+  for (const value of values) {
+    const cleaned = clean(value);
+    if (cleaned) return cleaned;
+  }
+  return "";
 }
