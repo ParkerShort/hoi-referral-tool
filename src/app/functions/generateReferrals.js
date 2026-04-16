@@ -457,9 +457,9 @@ function stringifyValue(value) {
   if (value == null) return "";
   if (Array.isArray(value)) return value.map(stringifyValue).filter(Boolean).join("; ");
   if (typeof value === "object") {
-    if (typeof value.label === "string") return value.label;
-    if (typeof value.name === "string") return value.name;
     if (typeof value.value === "string") return value.value;
+    if (typeof value.name === "string") return value.name;
+    if (typeof value.label === "string") return value.label;
     return "";
   }
   return String(value);
