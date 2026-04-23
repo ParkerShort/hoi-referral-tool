@@ -1,4 +1,5 @@
 const HUBSPOT_BASE_URL = "https://api.hubapi.com";
+const zipcodes = require("zipcodes");
 
 exports.main = async (context = {}) => {
   try {
@@ -87,7 +88,8 @@ exports.main = async (context = {}) => {
           process.env.REFERRAL_PROP_INSURANCES_ACCEPTED ||
           "insurances_accepted",
         status: process.env.REFERRAL_PROP_STATUS || "status"
-      }
+      },
+      toolGeneratedMarker: "Physician Referral Lookup Card"
     };
 
     if (!config.hubdbTableId) {
@@ -100,6 +102,9 @@ exports.main = async (context = {}) => {
     }
 
     const sentProps = context?.propertiesToSend || {};
+    const actionMode = normalizeActionMode(context?.parameters?.actionMode);
+    const radiusMiles = normalizeRadiusMiles(context?.parameters?.radiusMiles);
+    const auditEventName = clean(context?.parameters?.searchAuditEventName);
     const firstname = sentProps.firstname || "";
     const lastname = sentProps.lastname || "";
     const contactName = [firstname, lastname].filter(Boolean).join(" ").trim();
@@ -109,6 +114,8 @@ exports.main = async (context = {}) => {
       sentProps.what_insurance_plan_and_company_are_you_using
     );
     const zip = clean(sentProps.zip);
+    const insuranceFilterApplied = Boolean(insurance);
+    const locationFilterApplied = radiusMiles > 0;
 
     const pmi = config.pmiProperty
       ? await getContactProperty(accessToken, contactId, config.pmiProperty)
@@ -116,8 +123,7 @@ exports.main = async (context = {}) => {
 
     const missing = [];
     if (!specialtyNeeded) missing.push("specialty_required");
-    if (!insurance) missing.push("what_insurance_plan_and_company_are_you_using");
-    if (!zip) missing.push("zip");
+    if (locationFilterApplied && !zip) missing.push("zip");
 
     if (missing.length) {
       return {
@@ -128,7 +134,10 @@ exports.main = async (context = {}) => {
 
     const hubdbRows = await getHubDbRows(accessToken, config.hubdbTableId);
     const discoveredRowKeys = discoverHubDbKeys(hubdbRows);
-    const schemaIssues = validateHubDbSchema(discoveredRowKeys, config.columns);
+    const schemaIssues = validateHubDbSchema(discoveredRowKeys, config.columns, {
+      insuranceRequired: insuranceFilterApplied,
+      zipRequired: locationFilterApplied
+    });
 
     if (schemaIssues.length) {
       console.log(
@@ -146,7 +155,19 @@ exports.main = async (context = {}) => {
       );
     }
 
+    let deletedCount = 0;
+    if (actionMode === "replacement_search") {
+      deletedCount = await deleteExistingToolGeneratedReferrals(
+        accessToken,
+        contactId,
+        config.referralObjectType,
+        config.referralProperties.referredBy,
+        config.toolGeneratedMarker
+      );
+    }
+
     const evaluatedRows = hubdbRows.map((row) => {
+      const offices = getOffices(row);
       const aoeValue = firstNonEmptyValue([
         readColumn(row, config.columns.aoe),
         readColumn(row, "area_of_expertise_aoe"),
@@ -156,39 +177,45 @@ exports.main = async (context = {}) => {
         readColumn(row, config.columns.insurance),
         readColumn(row, "insurances_accepted")
       ]);
-      const zipValues = uniqueValues([
-        ...config.columns.zips.map((key) => readColumn(row, key)),
-        readColumn(row, "office_1_address_zip"),
-        readColumn(row, "office_2_address_zip"),
-        readColumn(row, "office_3_address_zip"),
-        readColumn(row, "office_4_address_zip"),
-        readColumn(row, "office_5_address_zip")
-      ]);
+      const zipValues = uniqueValues(offices.map((office) => office.zip));
+      const locationMatch = evaluateLocationMatch(offices, zip, radiusMiles);
 
       const specialtyMatch = matchesText(aoeValue, specialtyNeeded);
-      const insuranceMatch = matchesInsurance(insuranceValue, insurance);
-      const zipMatch = matchesAnyZip(zipValues, zip);
+      const insuranceMatch =
+        !insuranceFilterApplied || matchesInsurance(insuranceValue, insurance);
+      const zipMatch = locationMatch.matches;
 
       return {
         row,
+        offices,
         aoeValue,
         insuranceValue,
         zipValues,
         specialtyMatch,
         insuranceMatch,
         zipMatch,
-        score: [specialtyMatch, insuranceMatch, zipMatch].filter(Boolean).length
+        locationMatch,
+        score: [
+          specialtyMatch,
+          insuranceMatch,
+          locationFilterApplied ? zipMatch : null
+        ].filter(Boolean).length
       };
     });
 
-    const filtered = evaluatedRows
-      .filter((item) => item.specialtyMatch && item.insuranceMatch && item.zipMatch)
-      .map((item) => item.row);
+    const filteredItems = evaluatedRows.filter(
+      (item) => item.specialtyMatch && item.insuranceMatch && item.zipMatch
+    );
+    const filtered = filteredItems.map((item) => item.row);
 
     if (!filtered.length) {
       const specialtyMatches = evaluatedRows.filter((item) => item.specialtyMatch).length;
-      const insuranceMatches = evaluatedRows.filter((item) => item.insuranceMatch).length;
-      const zipMatches = evaluatedRows.filter((item) => item.zipMatch).length;
+      const insuranceMatches = insuranceFilterApplied
+        ? evaluatedRows.filter((item) => item.insuranceMatch).length
+        : evaluatedRows.length;
+      const zipMatches = locationFilterApplied
+        ? evaluatedRows.filter((item) => item.zipMatch).length
+        : 0;
       const nearMatches = evaluatedRows
         .filter((item) => item.score > 0)
         .sort((a, b) => b.score - a.score)
@@ -198,32 +225,48 @@ exports.main = async (context = {}) => {
           specialty: previewValue(item.aoeValue),
           insurance: previewValue(item.insuranceValue),
           zip: previewValue(item.zipValues),
+          distanceMiles: item.locationMatch.distanceMiles,
           matchedCriteria: [
             item.specialtyMatch ? "specialty" : null,
             item.insuranceMatch ? "insurance" : null,
-            item.zipMatch ? "zip" : null
+            item.zipMatch && locationFilterApplied ? "zip" : null
           ].filter(Boolean)
         }));
-      const zipMatchedExamples = evaluatedRows
-        .filter((item) => item.zipMatch)
-        .slice(0, 5)
-        .map((item) => ({
-          physicianName: getPhysicianName(item.row, config.columns.physicianName) || "Unknown",
-          specialty: previewValue(item.aoeValue),
-          insurance: previewValue(item.insuranceValue),
-          zip: previewValue(item.zipValues)
-        }));
+      const zipMatchedExamples = locationFilterApplied
+        ? evaluatedRows
+            .filter((item) => item.zipMatch)
+            .slice(0, 5)
+            .map((item) => ({
+              physicianName:
+                getPhysicianName(item.row, config.columns.physicianName) || "Unknown",
+              specialty: previewValue(item.aoeValue),
+              insurance: previewValue(item.insuranceValue),
+              zip: previewValue(item.zipValues),
+              distanceMiles: item.locationMatch.distanceMiles
+            }))
+        : [];
       const zipMatchedInsuranceSamples = uniqueValues(
         zipMatchedExamples.map((item) => item.insurance)
       ).slice(0, 3);
       const zipMatchedSpecialtySamples = uniqueValues(
         zipMatchedExamples.map((item) => item.specialty)
       ).slice(0, 3);
+      const nearestCandidate = locationFilterApplied
+        ? evaluatedRows
+            .filter((item) => item.specialtyMatch && item.insuranceMatch)
+            .filter((item) => Number.isFinite(item.locationMatch.distanceMiles))
+            .sort((a, b) => a.locationMatch.distanceMiles - b.locationMatch.distanceMiles)[0]
+        : null;
       console.log(
         JSON.stringify({
           event: "referral_lookup_no_match",
-          criteria: { specialtyNeeded, insurance, zip },
+          criteria: { specialtyNeeded, insurance, zip, radiusMiles },
           columns: config.columns,
+          filters: {
+            insuranceFilterApplied,
+            locationFilterApplied,
+            actionMode
+          },
           counts: {
             totalRows: evaluatedRows.length,
             specialtyMatches,
@@ -234,27 +277,44 @@ exports.main = async (context = {}) => {
           zipMatchedExamples,
           zipMatchedInsuranceSamples,
           zipMatchedSpecialtySamples,
+          nearestCandidateDistanceMiles: nearestCandidate?.locationMatch?.distanceMiles,
           discoveredRowKeys
         })
       );
 
-      const zipMatchedInsuranceNote = zipMatchedInsuranceSamples.length
-        ? ` ZIP-matched insurance samples: ${zipMatchedInsuranceSamples.join(" | ")}.`
-        : "";
-      const zipMatchedSpecialtyNote = zipMatchedSpecialtySamples.length
-        ? ` ZIP-matched specialty samples: ${zipMatchedSpecialtySamples.join(" | ")}.`
-        : "";
+      const noMatchMessage = buildNoMatchMessage({
+        insuranceFilterApplied,
+        locationFilterApplied,
+        specialtyMatches,
+        insuranceMatches,
+        zipMatches,
+        radiusMiles,
+        zipMatchedInsuranceSamples,
+        zipMatchedSpecialtySamples,
+        nearestDistanceMiles: nearestCandidate?.locationMatch?.distanceMiles
+      });
+
+      await sendSearchAuditEvent(accessToken, auditEventName, {
+        eventName: auditEventName,
+        objectId: String(contactId),
+        specialty: specialtyNeeded,
+        insurance,
+        insuranceFilterApplied,
+        zip,
+        radiusMiles,
+        locationFilterApplied,
+        matchingProviderCount: 0,
+        createdReferralCount: 0,
+        actionMode
+      });
 
       return {
         status: "success",
         contactName,
         createdCount: 0,
+        deletedCount,
         results: [],
-        message:
-          "No physicians match this patient’s criteria. " +
-          `Matched specialty in ${specialtyMatches} row(s), insurance in ${insuranceMatches}, and ZIP in ${zipMatches}.` +
-          zipMatchedSpecialtyNote +
-          zipMatchedInsuranceNote,
+        message: noMatchMessage,
         diagnostics: {
           totalRows: evaluatedRows.length,
           specialtyMatches,
@@ -263,15 +323,17 @@ exports.main = async (context = {}) => {
           nearMatches,
           zipMatchedExamples,
           zipMatchedInsuranceSamples,
-          zipMatchedSpecialtySamples
+          zipMatchedSpecialtySamples,
+          nearestCandidateDistanceMiles: nearestCandidate?.locationMatch?.distanceMiles
         }
       };
     }
 
-    const randomized = shuffle(filtered).slice(0, 3);
+    const randomized = shuffle(filteredItems).slice(0, 3);
 
     const created = [];
-    for (const row of randomized) {
+    for (const item of randomized) {
+      const row = item.row;
       const physicianName = getPhysicianName(row, config.columns.physicianName);
       const firstName = clean(readColumn(row, "first_name"));
       const lastName = clean(readColumn(row, "last_name"));
@@ -310,9 +372,11 @@ exports.main = async (context = {}) => {
       const stateLicenseState = clean(readColumn(row, "state_license_state"));
       const dea = clean(readColumn(row, "dea"));
       const status = normalizeReferralStatus(readColumn(row, "status"));
-      const offices = getOffices(row);
-      const matchedOffice = findBestMatchingOffice(offices, zip);
-      const primaryOffice = matchedOffice || offices.find(hasOfficeData) || null;
+      const offices = item.offices || getOffices(row);
+      const primaryOffice =
+        item.locationMatch?.matchedOffice ||
+        offices.find(hasOfficeData) ||
+        null;
       const providerZip = primaryOffice?.zip || "";
       const phone = firstNonEmptyValue([
         primaryOffice?.telephone,
@@ -536,14 +600,30 @@ exports.main = async (context = {}) => {
         physicianName,
         phone,
         fax,
-        address
+        address,
+        distanceMiles: item.locationMatch?.distanceMiles ?? null
       });
     }
+
+    await sendSearchAuditEvent(accessToken, auditEventName, {
+      eventName: auditEventName,
+      objectId: String(contactId),
+      specialty: specialtyNeeded,
+      insurance,
+      insuranceFilterApplied,
+      zip,
+      radiusMiles,
+      locationFilterApplied,
+      matchingProviderCount: filteredItems.length,
+      createdReferralCount: created.length,
+      actionMode
+    });
 
     return {
       status: "success",
       contactName,
       createdCount: created.length,
+      deletedCount,
       results: created
     };
   } catch (e) {
@@ -728,6 +808,127 @@ async function getContactProperty(token, contactId, propertyName) {
   return clean(contact?.properties?.[propertyName]);
 }
 
+async function getAssociatedObjectIds(token, fromObjectType, fromObjectId, toObjectType) {
+  const ids = [];
+  let after;
+
+  do {
+    const query = new URLSearchParams();
+    if (after) query.set("after", after);
+
+    const result = await hubspotFetch(
+      `/crm/v4/objects/${fromObjectType}/${fromObjectId}/associations/${toObjectType}${query.toString() ? `?${query.toString()}` : ""}`,
+      token,
+      { method: "GET" }
+    );
+
+    ids.push(...(result?.results || []).map((item) => String(item.toObjectId)));
+    after = result?.paging?.next?.after;
+  } while (after);
+
+  return ids;
+}
+
+async function batchReadObjectRecords(token, objectType, ids, properties = []) {
+  if (!ids.length) return [];
+
+  const result = await hubspotFetch(
+    `/crm/v3/objects/${objectType}/batch/read`,
+    token,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        properties,
+        inputs: ids.map((id) => ({ id: String(id) }))
+      })
+    }
+  );
+
+  return result?.results || [];
+}
+
+async function deleteCustomObjectRecord(token, objectType, id) {
+  return hubspotFetch(
+    `/crm/v3/objects/${objectType}/${id}`,
+    token,
+    { method: "DELETE" }
+  );
+}
+
+async function deleteExistingToolGeneratedReferrals(
+  token,
+  contactId,
+  referralObjectType,
+  referredByProperty,
+  referredByMarker
+) {
+  const associatedIds = await getAssociatedObjectIds(
+    token,
+    "contact",
+    contactId,
+    referralObjectType
+  );
+
+  if (!associatedIds.length) return 0;
+
+  const associatedRecords = await batchReadObjectRecords(
+    token,
+    referralObjectType,
+    associatedIds,
+    [referredByProperty]
+  );
+
+  const toolGeneratedIds = associatedRecords
+    .filter(
+      (record) => clean(record?.properties?.[referredByProperty]) === referredByMarker
+    )
+    .map((record) => String(record.id));
+
+  for (const id of toolGeneratedIds) {
+    await deleteCustomObjectRecord(token, referralObjectType, id);
+  }
+
+  return toolGeneratedIds.length;
+}
+
+async function sendSearchAuditEvent(token, eventName, payload) {
+  if (!eventName) return;
+
+  try {
+    await hubspotFetch(
+      `/events/v3/send`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          eventName,
+          objectId: payload.objectId,
+          occurredAt: new Date().toISOString(),
+          properties: compactObject({
+            specialty: payload.specialty,
+            insurance: payload.insurance,
+            insurance_filter_applied: String(Boolean(payload.insuranceFilterApplied)),
+            zip: payload.zip,
+            radius_miles: payload.radiusMiles,
+            location_filter_applied: String(Boolean(payload.locationFilterApplied)),
+            matching_provider_count: payload.matchingProviderCount,
+            created_referral_count: payload.createdReferralCount,
+            action_mode: payload.actionMode
+          })
+        })
+      }
+    );
+  } catch (err) {
+    console.log(
+      JSON.stringify({
+        event: "referral_search_audit_skipped",
+        reason: err?.message || "unknown",
+        eventName
+      })
+    );
+  }
+}
+
 function stringifyValue(value) {
   if (value == null) return "";
   if (Array.isArray(value)) return value.map(stringifyValue).filter(Boolean).join("; ");
@@ -758,6 +959,19 @@ function normalizeText(value) {
 function normalizeZip(value) {
   const digits = stringifyValue(value).replace(/\D/g, "");
   return digits.slice(0, 5);
+}
+
+function normalizeRadiusMiles(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return 0;
+  }
+
+  return Math.round(numericValue);
+}
+
+function normalizeActionMode(value) {
+  return value === "replacement_search" ? "replacement_search" : "initial_search";
 }
 
 function previewValue(value) {
@@ -840,6 +1054,88 @@ function hasOfficeData(office) {
     office &&
       (office.address || office.city || office.state || office.zip || office.telephone)
   );
+}
+
+function evaluateLocationMatch(offices, targetZip, radiusMiles) {
+  if (radiusMiles <= 0) {
+    return {
+      matches: true,
+      exactMatch: false,
+      withinRadiusMatch: false,
+      distanceMiles: null,
+      matchedOffice: null
+    };
+  }
+
+  const normalizedTargetZip = normalizeZip(targetZip);
+  if (!normalizedTargetZip) {
+    return {
+      matches: false,
+      exactMatch: false,
+      withinRadiusMatch: false,
+      distanceMiles: null,
+      matchedOffice: null
+    };
+  }
+
+  const targetCentroid = getZipCentroid(normalizedTargetZip);
+  if (!targetCentroid) {
+    return {
+      matches: false,
+      exactMatch: false,
+      withinRadiusMatch: false,
+      distanceMiles: null,
+      matchedOffice: null
+    };
+  }
+
+  let bestMatch = null;
+  let exactOffice = null;
+
+  for (const office of offices) {
+    const officeZip = normalizeZip(office?.zip);
+    if (!officeZip) continue;
+
+    if (officeZip === normalizedTargetZip && !exactOffice) {
+      exactOffice = office;
+    }
+
+    const officeCentroid = getZipCentroid(officeZip);
+    if (!officeCentroid) continue;
+
+    const distanceMiles = calculateDistanceMiles(targetCentroid, officeCentroid);
+    if (!bestMatch || distanceMiles < bestMatch.distanceMiles) {
+      bestMatch = { office, distanceMiles };
+    }
+  }
+
+  if (exactOffice) {
+    return {
+      matches: true,
+      exactMatch: true,
+      withinRadiusMatch: true,
+      distanceMiles: 0,
+      matchedOffice: exactOffice
+    };
+  }
+
+  if (bestMatch && bestMatch.distanceMiles <= radiusMiles) {
+    return {
+      matches: true,
+      exactMatch: false,
+      withinRadiusMatch: true,
+      distanceMiles: roundDistance(bestMatch.distanceMiles),
+      matchedOffice: bestMatch.office
+    };
+  }
+
+  return {
+    matches: false,
+    exactMatch: false,
+    withinRadiusMatch: false,
+    distanceMiles: bestMatch ? roundDistance(bestMatch.distanceMiles) : null,
+    matchedOffice: null
+  };
 }
 
 function findBestMatchingOffice(offices, targetZip) {
@@ -938,6 +1234,101 @@ function firstValue(value) {
   return toValueList(value)[0] || "";
 }
 
+function getZipCentroid(zip) {
+  const lookup = zipcodes.lookup(normalizeZip(zip));
+  if (!lookup) return null;
+
+  return {
+    latitude: Number(lookup.latitude),
+    longitude: Number(lookup.longitude)
+  };
+}
+
+function calculateDistanceMiles(from, to) {
+  const earthRadiusMiles = 3958.8;
+  const lat1 = toRadians(from.latitude);
+  const lat2 = toRadians(to.latitude);
+  const deltaLat = toRadians(to.latitude - from.latitude);
+  const deltaLon = toRadians(to.longitude - from.longitude);
+
+  const a =
+    Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+    Math.cos(lat1) *
+      Math.cos(lat2) *
+      Math.sin(deltaLon / 2) *
+      Math.sin(deltaLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusMiles * c;
+}
+
+function toRadians(value) {
+  return (value * Math.PI) / 180;
+}
+
+function roundDistance(value) {
+  return Math.round(value * 10) / 10;
+}
+
+function compactObject(object) {
+  return Object.fromEntries(
+    Object.entries(object).filter(([, value]) => {
+      if (value == null) return false;
+      if (typeof value === "string") return value.trim() !== "";
+      return true;
+    })
+  );
+}
+
+function buildNoMatchMessage({
+  insuranceFilterApplied,
+  locationFilterApplied,
+  specialtyMatches,
+  insuranceMatches,
+  zipMatches,
+  radiusMiles,
+  zipMatchedInsuranceSamples,
+  zipMatchedSpecialtySamples,
+  nearestDistanceMiles
+}) {
+  const parts = [];
+
+  if (!insuranceFilterApplied && !locationFilterApplied) {
+    parts.push(
+      `No physicians match this patient's specialty. Matched specialty in ${specialtyMatches} row(s).`
+    );
+  } else if (!locationFilterApplied) {
+    parts.push(
+      `No physicians match this patient's criteria. Matched specialty in ${specialtyMatches} row(s) and insurance in ${insuranceMatches}.`
+    );
+  } else if (!insuranceFilterApplied) {
+    parts.push(
+      `No physicians match this patient's specialty within ${radiusMiles} mile(s). Matched specialty in ${specialtyMatches} row(s), and ${zipMatches} provider row(s) were within radius.`
+    );
+  } else {
+    parts.push(
+      `No physicians match this patient's criteria within ${radiusMiles} mile(s). Matched specialty in ${specialtyMatches} row(s), insurance in ${insuranceMatches}, and ${zipMatches} provider row(s) were within radius.`
+    );
+  }
+
+  if (zipMatchedSpecialtySamples.length) {
+    parts.push(
+      `Nearby specialty samples: ${zipMatchedSpecialtySamples.join(" | ")}.`
+    );
+  }
+
+  if (zipMatchedInsuranceSamples.length) {
+    parts.push(
+      `Nearby insurance samples: ${zipMatchedInsuranceSamples.join(" | ")}.`
+    );
+  }
+
+  if (Number.isFinite(nearestDistanceMiles)) {
+    parts.push(`Nearest qualifying office was ${nearestDistanceMiles} mile(s) away.`);
+  }
+
+  return parts.join(" ");
+}
+
 function discoverHubDbKeys(rows) {
   const keySet = new Set();
 
@@ -954,7 +1345,11 @@ function discoverHubDbKeys(rows) {
   return [...keySet];
 }
 
-function validateHubDbSchema(discoveredRowKeys, columns) {
+function validateHubDbSchema(
+  discoveredRowKeys,
+  columns,
+  { insuranceRequired = true, zipRequired = true } = {}
+) {
   const keySet = new Set(discoveredRowKeys || []);
   const issues = [];
 
@@ -968,14 +1363,14 @@ function validateHubDbSchema(discoveredRowKeys, columns) {
     );
   }
 
-  if (!keySet.has(columns.insurance)) {
+  if (insuranceRequired && !keySet.has(columns.insurance)) {
     issues.push(
       `Expected insurance column '${columns.insurance}' was not found in live table keys.`
     );
   }
 
   const hasAnyZipColumn = (columns.zips || []).some((key) => keySet.has(key));
-  if (!hasAnyZipColumn) {
+  if (zipRequired && !hasAnyZipColumn) {
     issues.push(
       `None of the expected ZIP columns were found: ${(columns.zips || []).join(", ")}.`
     );

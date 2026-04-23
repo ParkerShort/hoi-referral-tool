@@ -9,6 +9,7 @@ import {
   Divider,
   Flex,
   LoadingButton,
+  NumberInput,
   Table,
   TableBody,
   TableCell,
@@ -31,14 +32,9 @@ const CRM_PROPERTIES = [
   "zip"
 ];
 
-const REQUIRED_FIELDS = [
-  { key: "specialty_required", label: "Specialty needed" },
-  {
-    key: "what_insurance_plan_and_company_are_you_using",
-    label: "Insurance"
-  },
-  { key: "zip", label: "ZIP" }
-];
+// Optional app configuration for custom event audit logging.
+// Leave blank to skip audit logging when searches run.
+const SEARCH_AUDIT_EVENT_NAME = "";
 
 function ReferralLookupCard({ context, actions }) {
   const [loading, setLoading] = useState(false);
@@ -46,6 +42,7 @@ function ReferralLookupCard({ context, actions }) {
   const [createdCount, setCreatedCount] = useState(0);
   const [error, setError] = useState("");
   const [lastPatientName, setLastPatientName] = useState("");
+  const [radiusMiles, setRadiusMiles] = useState("");
 
   const contactId =
     context?.crm?.objectId ||
@@ -67,17 +64,26 @@ function ReferralLookupCard({ context, actions }) {
   const lastname = properties?.lastname || "";
 
   const patientName = [firstname, lastname].filter(Boolean).join(" ").trim();
+  const normalizedRadiusMiles = normalizeRadiusMiles(radiusMiles);
+  const zipRequired = normalizedRadiusMiles > 0;
   const missingFields = useMemo(() => {
-    return REQUIRED_FIELDS.filter(({ key }) => {
-      const value = properties?.[key];
-      return !value || String(value).trim() === "";
-    });
-  }, [properties]);
+    const missing = [];
+
+    if (!specialtyNeeded || String(specialtyNeeded).trim() === "") {
+      missing.push("Specialty needed");
+    }
+
+    if (zipRequired && (!zip || String(zip).trim() === "")) {
+      missing.push("ZIP");
+    }
+
+    return missing;
+  }, [specialtyNeeded, zipRequired, zip]);
 
   const isDisabled =
     loading || propertiesLoading || !contactId || missingFields.length > 0;
 
-  const handleGetReferrals = async () => {
+  const runSearch = async (actionMode) => {
     setLoading(true);
     setError("");
     setResults([]);
@@ -86,7 +92,10 @@ function ReferralLookupCard({ context, actions }) {
     try {
       const result = await hubspot.serverless("hoi_referral_generate", {
         parameters: {
-          contactId
+          contactId,
+          actionMode,
+          radiusMiles: normalizedRadiusMiles,
+          searchAuditEventName: SEARCH_AUDIT_EVENT_NAME
         },
         propertiesToSend: [
           "firstname",
@@ -117,12 +126,8 @@ function ReferralLookupCard({ context, actions }) {
     }
   };
 
-  const handleReset = () => {
-    setResults([]);
-    setCreatedCount(0);
-    setError("");
-    setLastPatientName("");
-  };
+  const handleGetReferrals = () => runSearch("initial_search");
+  const handleNewSearch = () => runSearch("replacement_search");
 
   return (
     <Box>
@@ -135,13 +140,27 @@ function ReferralLookupCard({ context, actions }) {
           <DescriptionListItem label="Specialty needed">
             {specialtyNeeded || "—"}
           </DescriptionListItem>
-          <DescriptionListItem label="Insurance">
+          <DescriptionListItem label="Insurance (optional)">
             {insurance || "—"}
           </DescriptionListItem>
           <DescriptionListItem label="ZIP">
             {zip || "—"}
           </DescriptionListItem>
+          <DescriptionListItem label="Radius (miles)">
+            {normalizedRadiusMiles > 0 ? normalizedRadiusMiles : "Any distance"}
+          </DescriptionListItem>
         </DescriptionList>
+
+        <NumberInput
+          name="radiusMiles"
+          label="Search radius (miles)"
+          description="Leave blank or 0 to ignore ZIP and search by specialty, plus insurance if provided."
+          placeholder="0"
+          min={0}
+          precision={0}
+          value={radiusMiles}
+          onChange={setRadiusMiles}
+        />
 
         {!contactId && (
           <Alert title="Missing contact context" variant="warning">
@@ -157,7 +176,7 @@ function ReferralLookupCard({ context, actions }) {
 
         {missingFields.length > 0 && (
           <Alert title="Missing required fields" variant="warning">
-            Please fill in: {missingFields.map((f) => f.label).join(", ")}
+            Please fill in: {missingFields.join(", ")}
           </Alert>
         )}
 
@@ -169,9 +188,9 @@ function ReferralLookupCard({ context, actions }) {
 
         {!error && results.length === 0 && missingFields.length === 0 && (
           <Text>
-            Click Get Referrals to read the contact criteria, query HubDB,
-            randomize matching physicians, create referral records, and display up
-            to 3 results.
+            Click Get Referrals to query HubDB by specialty, optionally narrow by
+            insurance, optionally filter by radius, randomize matching physicians,
+            create referral records, and display up to 3 results.
           </Text>
         )}
 
@@ -183,12 +202,16 @@ function ReferralLookupCard({ context, actions }) {
           <LoadingButton
             onClick={handleGetReferrals}
             loading={loading}
-            disabled={isDisabled}
+            disabled={isDisabled || results.length > 0}
           >
             Get Referrals
           </LoadingButton>
 
-          <Button variant="secondary" onClick={handleReset} disabled={loading}>
+          <Button
+            variant="secondary"
+            onClick={handleNewSearch}
+            disabled={isDisabled}
+          >
             New Search
           </Button>
         </Flex>
@@ -227,4 +250,13 @@ function ReferralLookupCard({ context, actions }) {
       </Flex>
     </Box>
   );
+}
+
+function normalizeRadiusMiles(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return 0;
+  }
+
+  return Math.round(numericValue);
 }
